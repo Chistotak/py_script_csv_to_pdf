@@ -5,23 +5,23 @@ import logging
 import sys
 import os
 import configparser
-import re  # Для extract_microservice_info_for_summary
+import re
 
-import csv_importer
+import csv_importer  # Предполагается, что он актуален
 
 try:
-    import docx_creator
+    import docx_creator  # Обновленный docx_creator
 except ImportError:
     sys.exit(1)
 
 # --- Стандартные значения ---
-DEFAULT_COL_ISSUE_KEY = "Issue key"
+DEFAULT_MAIN_CONFIG_FILE = "config.ini"
+DEFAULT_STYLES_CONFIG_FILE = "styles.ini"
+DEFAULT_COL_ISSUE_KEY = "Issue key";
 DEFAULT_COL_FIX_VERSIONS_NAME = "Fix Version/s"
-DEFAULT_COL_CUSTOMER_DESC = "Custom field (Description for the customer)"
+DEFAULT_COL_CUSTOMER_DESC = "Custom field (Description for the customer)";
 DEFAULT_COL_INSTALL_INSTRUCTIONS = "Custom field (Инструкция по установке)"
-DEFAULT_COL_ISSUE_TYPE = "Issue Type"
-DEFAULT_CONFIG_FILE = "config.ini"
-DEFAULT_FONT_NAME_DOCX = "Arial"
+DEFAULT_COL_ISSUE_TYPE = "Issue Type";
 DEFAULT_CSV_INPUT_FILE = "input.csv"
 DEFAULT_DOCX_OUTPUT_FILE = "output_releasenotes.docx"
 
@@ -32,155 +32,117 @@ def setup_logging():
                         handlers=[logging.StreamHandler(sys.stdout)])
 
 
-def load_config(config_filepath=DEFAULT_CONFIG_FILE):
+def _parse_config_file(config_filepath, default_structure=None):
     logger = logging.getLogger(__name__)
     config = configparser.ConfigParser(allow_no_value=True, inline_comment_prefixes=('#', ';'))
-    config.optionxform = str  # Сохраняем регистр ключей опций
-
-    config_data = {
-        'General': {},
-        'MicroserviceVersions': {},
-        'IssueTypeNames': {},
-        'Columns': {}
-    }
-    # Устанавливаем значения по умолчанию
-    config_data['General']['docx_font'] = DEFAULT_FONT_NAME_DOCX
-    config_data['General']['release_title_format'] = "{{global_version}}"
-    config_data['General']['use_issue_type_grouping'] = 'true'
-    config_data['General']['csv_input_file'] = DEFAULT_CSV_INPUT_FILE
-    config_data['General']['docx_output_file'] = DEFAULT_DOCX_OUTPUT_FILE
-
-    config_data['Columns']['key'] = DEFAULT_COL_ISSUE_KEY
-    config_data['Columns']['fix_versions'] = DEFAULT_COL_FIX_VERSIONS_NAME
-    config_data['Columns']['customer_desc'] = DEFAULT_COL_CUSTOMER_DESC
-    config_data['Columns']['install_instructions'] = DEFAULT_COL_INSTALL_INSTRUCTIONS
-    config_data['Columns']['issue_type'] = DEFAULT_COL_ISSUE_TYPE
-
+    config.optionxform = str
+    parsed_data = {section: dict(values) for section, values in default_structure.items()} if default_structure else {}
     if os.path.exists(config_filepath):
         try:
             config.read(config_filepath, encoding='utf-8')
             logger.info(f"Конфигурационный файл '{config_filepath}' успешно загружен.")
             for section_name_from_file in config.sections():
-                # Ищем соответствие секции из файла в нашем config_data
-                # (с учетом возможного разного регистра, хотя optionxform=str должен помочь)
-                matched_section_key = None
-                for key_in_config_data in config_data.keys():
-                    if key_in_config_data.lower() == section_name_from_file.lower():
-                        matched_section_key = key_in_config_data
-                        break
-
-                if matched_section_key:
-                    config_data[matched_section_key].update(dict(config.items(section_name_from_file)))
+                file_values = dict(config.items(section_name_from_file))
+                matched_section_key = section_name_from_file  # Так как optionxform = str, имена секций тоже сохраняют регистр
+                if matched_section_key in parsed_data:
+                    parsed_data[matched_section_key].update(file_values)
                 else:
-                    # Если секции нет в нашем шаблоне, добавляем ее как есть
-                    config_data[section_name_from_file] = dict(config.items(section_name_from_file))
+                    parsed_data[matched_section_key] = file_values
         except configparser.Error as e:
-            logger.error(f"Ошибка при чтении конфигурационного файла '{config_filepath}': {e}")
+            logger.error(f"Ошибка при чтении '{config_filepath}': {e}")
     else:
-        logger.warning(
-            f"Конфигурационный файл '{config_filepath}' не найден. Будут использованы значения по умолчанию.")
-
-    logger.debug(f"Загруженная конфигурация: {config_data}")
-    return config_data
+        logger.warning(f"Файл '{config_filepath}' не найден. Используются дефолты (если есть).")
+    return parsed_data
 
 
-def extract_microservice_info_for_summary(grouped_data_keys, config_data):
+def load_all_configs(main_config_path=DEFAULT_MAIN_CONFIG_FILE):
     logger = logging.getLogger(__name__)
-    microservices_summary = []
-    version_pattern = re.compile(r"^([A-Z]{2})(\d+(\.\d+){1,2})$")
-    seen_summary_entries = set()
+    main_config_defaults = {
+        'General': {'csv_input_file': DEFAULT_CSV_INPUT_FILE, 'docx_output_file': DEFAULT_DOCX_OUTPUT_FILE,
+                    'logo_path': '', 'logo_width_inches': '1.5', 'release_title_format': "{{global_version}}",
+                    'use_issue_type_grouping': 'true', 'styles_config_file': DEFAULT_STYLES_CONFIG_FILE},
+        'Columns': {'key': DEFAULT_COL_ISSUE_KEY, 'fix_versions': DEFAULT_COL_FIX_VERSIONS_NAME,
+                    'customer_desc': DEFAULT_COL_CUSTOMER_DESC,
+                    'install_instructions': DEFAULT_COL_INSTALL_INSTRUCTIONS,
+                    'issue_type': DEFAULT_COL_ISSUE_TYPE},
+        'MicroserviceVersions': {}, 'IssueTypeNames': {}
+    }
+    main_config_data = _parse_config_file(main_config_path, main_config_defaults)
+    main_config_data['_config_dir_'] = os.path.dirname(
+        os.path.abspath(main_config_path))  # Сохраняем путь к директории основного конфига
+    logger.debug(f"Загружена основная конфигурация: {main_config_data}")
 
-    for original_ms_key in sorted(list(grouped_data_keys)):
-        service_name_for_table = original_ms_key
-        version_number_part = ""
+    styles_config_defaults = {
+        'Fonts': {'main': 'Arial', 'title': 'Calibri Light'}, 'FontSizes': {'title': '22', 'normal_style_base': '11'},
+        'Colors': {'title': '003366', 'normal_text': '333333'},
+        'Spacing': {'after_title': '6', 'normal_paragraph_after': '6'},
+        'TableLayout': {'summary_table_col1_width_inches': '4.0', 'summary_table_col2_width_inches': '1.5'}
+    }
+    styles_file_path = main_config_data.get('General', {}).get('styles_config_file', DEFAULT_STYLES_CONFIG_FILE)
+    if not os.path.isabs(styles_file_path):
+        styles_file_path = os.path.join(main_config_data['_config_dir_'], styles_file_path)
 
-        match = version_pattern.match(original_ms_key)
-        if match:
-            prefix_key_for_config = match.group(1).upper()  # Ключ для поиска в конфиге (AM, FR)
-            version_number_part = match.group(2)
-
-            template = config_data.get('MicroserviceVersions', {}).get(prefix_key_for_config)
-            if template:
-                # Извлекаем "чистое" имя сервиса из шаблона
-                # Удаляем "(версия {{version}})" и лишние пробелы
-                service_name_for_table = template.replace("{{version}}", "").replace("(версия )", "").strip()
-            else:
-                service_name_for_table = prefix_key_for_config  # Если шаблона нет, используем префикс
-        else:
-            logger.warning(
-                f"Не удалось разобрать ключ микросервиса '{original_ms_key}' для сводной таблицы, будет использован как есть.")
-            # В этом случае service_name_for_table = original_ms_key, version_number_part = ""
-
-        # Ключ для проверки уникальности строки в таблице
-        summary_tuple = (service_name_for_table, version_number_part)
-        if summary_tuple not in seen_summary_entries:
-            microservices_summary.append({
-                'service_name': service_name_for_table,
-                'version_number': version_number_part
-            })
-            seen_summary_entries.add(summary_tuple)
-            logger.debug(
-                f"Для сводной таблицы: Сервис='{service_name_for_table}', Версия='{version_number_part}' (из ключа '{original_ms_key}')")
-
-    return microservices_summary
+    styles_config_data = _parse_config_file(styles_file_path, styles_config_defaults)
+    logger.debug(f"Загружена конфигурация стилей: {styles_config_data}")
+    return main_config_data, styles_config_data
 
 
 def main():
     setup_logging()
     logger = logging.getLogger(__name__)
 
-    parser = argparse.ArgumentParser(description="Генератор DOCX с описанием релиза из JIRA CSV.")
-    parser.add_argument("--config", default=DEFAULT_CONFIG_FILE,
-                        help=f"Путь к конфигурационному файлу (по умолчанию: {DEFAULT_CONFIG_FILE})")
-    parser.add_argument("--csv-file", help="Переопределить путь к входному CSV файлу (из config.ini).")
-    parser.add_argument("--docx-file", help="Переопределить путь к выходному DOCX файлу (из config.ini).")
-    parser.add_argument("--col-key", help=f"Переопределить имя колонки с ключом задачи")
-    parser.add_argument("--col-fix-versions", help=f"Переопределить имя колонки с версиями фиксации")
-    parser.add_argument("--no-issue-type-grouping", action='store_true',
-                        help="Отключить группировку по типу задачи (переопределяет config.ini).")
+    parser = argparse.ArgumentParser(description="Генератор DOCX релиза из JIRA CSV.")
+    parser.add_argument("--config", default=DEFAULT_MAIN_CONFIG_FILE,
+                        help=f"Основной конфиг (по умолч: {DEFAULT_MAIN_CONFIG_FILE})")
+    parser.add_argument("--styles-config", help="Конфиг стилей (переопред. из основного)")
+    parser.add_argument("--csv-file", help="Входной CSV (переопред. из основного конфига)")
+    parser.add_argument("--docx-file", help="Выходной DOCX (переопред. из основного конфига)")
+    parser.add_argument("--col-key", help="Колонка ключа задачи")
+    parser.add_argument("--col-fix-versions", help="Колонка версий")
+    parser.add_argument("--no-issue-type-grouping", action='store_true', help="Отключить группировку по типу")
     args = parser.parse_args()
 
-    config_file_path = args.config
-    config_data = load_config(config_file_path)
+    main_cfg, styles_cfg = load_all_configs(args.config)
+    if args.styles_config:
+        styles_cfg_path = args.styles_config
+        if not os.path.isabs(
+                styles_cfg_path):  # Делаем путь к конфигу стилей абсолютным от директории основного конфига
+            styles_cfg_path = os.path.join(main_cfg['_config_dir_'], styles_cfg_path)
+        styles_cfg = _parse_config_file(styles_cfg_path, styles_cfg)  # Перезагружаем с учетом предыдущих дефолтов
+        logger.info(f"Конфигурация стилей перезагружена из CLI: {styles_cfg_path}")
 
-    csv_file_path = args.csv_file if args.csv_file else config_data['General'].get('csv_input_file',
-                                                                                   DEFAULT_CSV_INPUT_FILE)
-    docx_file_path = args.docx_file if args.docx_file else config_data['General'].get('docx_output_file',
-                                                                                      DEFAULT_DOCX_OUTPUT_FILE)
-    docx_font_name = config_data['General'].get('docx_font', DEFAULT_FONT_NAME_DOCX)
+    csv_fpath = args.csv_file if args.csv_file else main_cfg['General'].get('csv_input_file')
+    docx_fpath = args.docx_file if args.docx_file else main_cfg['General'].get('docx_output_file')
 
-    col_config = {
-        'key': args.col_key if args.col_key else config_data['Columns'].get('key', DEFAULT_COL_ISSUE_KEY),
-        'fix_versions_name': args.col_fix_versions if args.col_fix_versions else config_data['Columns'].get(
-            'fix_versions', DEFAULT_COL_FIX_VERSIONS_NAME),
-        'customer_desc': config_data['Columns'].get('customer_desc', DEFAULT_COL_CUSTOMER_DESC),
-        'install_instructions': config_data['Columns'].get('install_instructions', DEFAULT_COL_INSTALL_INSTRUCTIONS),
-        'issue_type': config_data['Columns'].get('issue_type', DEFAULT_COL_ISSUE_TYPE),
+    col_cfg = {
+        'key': args.col_key if args.col_key else main_cfg['Columns'].get('key'),
+        'fix_versions_name': args.col_fix_versions if args.col_fix_versions else main_cfg['Columns'].get(
+            'fix_versions'),
+        'customer_desc': main_cfg['Columns'].get('customer_desc'),
+        'install_instructions': main_cfg['Columns'].get('install_instructions'),
+        'issue_type': main_cfg['Columns'].get('issue_type'),
     }
-    if args.no_issue_type_grouping:
-        col_config['use_issue_type_grouping'] = False
-    else:
-        col_config['use_issue_type_grouping'] = config_data['General'].get('use_issue_type_grouping',
-                                                                           'true').lower() == 'true'
+    col_cfg['use_issue_type_grouping'] = not args.no_issue_type_grouping if args.no_issue_type_grouping else \
+        main_cfg['General'].get('use_issue_type_grouping', 'true').lower() == 'true'
 
     logger.info(f"--- Начало генерации отчета ---")
-    # ... (логирование параметров) ...
+    logger.info(f"Основной конфиг: {os.path.abspath(args.config)}")
+    logger.info(
+        f"Конфиг стилей: {os.path.abspath(styles_cfg_path if args.styles_config else main_cfg.get('General', {}).get('styles_config_file', 'styles.ini'))}")  # Показываем используемый путь
+    logger.info(f"Входной CSV: {os.path.abspath(csv_fpath)}")
+    logger.info(f"Выходной DOCX: {os.path.abspath(docx_fpath)}")
 
     raw_task_data, header_map, fix_versions_col_indices, issue_type_col_idx = \
-        csv_importer.load_and_process_issues(csv_file_path, col_config)
-
-    if raw_task_data is None:
-        sys.exit(1)
-    # ... (логирование количества прочитанных строк) ...
+        csv_importer.load_and_process_issues(csv_fpath, col_cfg)
+    if raw_task_data is None: sys.exit(1)
 
     global_version_part = csv_importer.find_global_version_title(raw_task_data, fix_versions_col_indices)
-    # ... (логика формирования final_release_title) ...
-    release_title_override = config_data['General'].get('release_title_override')
+    # ... (логика final_release_title как в предыдущей версии main.py, используя main_cfg['General']) ...
+    release_title_override = main_cfg['General'].get('release_title_override')
     if release_title_override:
         final_release_title = release_title_override
-        logger.info(f"Заголовок релиза взят из конфигурации (override): '{final_release_title}'")
     else:
-        title_format_template = config_data['General'].get('release_title_format', "{{global_version}}")
+        title_format_template = main_cfg['General'].get('release_title_format', "{{global_version}}")
         if global_version_part:
             final_release_title = title_format_template.replace("{{global_version}}", global_version_part)
         else:
@@ -188,50 +150,36 @@ def main():
             if title_format_template and title_format_template != "{{global_version}}":
                 final_release_title = title_format_template.replace("{{global_version}}", "Не указана").strip().rstrip(
                     ':').strip()
-                if not final_release_title or final_release_title == config_data['General'].get('release_title_format',
-                                                                                                "").replace(
+                if not final_release_title or final_release_title == main_cfg['General'].get('release_title_format',
+                                                                                             "").replace(
                         "{{global_version}}", "").strip().rstrip(':').strip():
                     final_release_title = default_title_if_no_global
             else:
                 final_release_title = default_title_if_no_global
-            logger.warning(
-                f"Глобальная версия не найдена, используется шаблон/заглушка для заголовка: '{final_release_title}'")
-    logger.info(f"Финальный заголовок релиза для документа: '{final_release_title}'")
+            logger.warning(f"Глобальная версия не найдена, используется '{final_release_title}'")
+    logger.info(f"Финальный заголовок: '{final_release_title}'")
 
-    logger.info("Группировка задач...")
-    grouped_issues_data = csv_importer.group_issues_by_version_and_type(
-        raw_task_data, header_map, col_config, fix_versions_col_indices, issue_type_col_idx, config_data
-    )
+    grouped_issues_data = csv_importer.group_issues_by_version_and_type(raw_task_data, header_map, col_cfg,
+                                                                        fix_versions_col_indices, issue_type_col_idx,
+                                                                        main_cfg)
+    if grouped_issues_data is None: sys.exit(1)
 
-    if grouped_issues_data is None:
-        sys.exit(1)
-    # ... (логирование количества сгруппированных версий) ...
-
-    microservices_for_summary_table = []
+    ms_summary_data = []
     if grouped_issues_data:
-        microservices_for_summary_table = extract_microservice_info_for_summary(
-            grouped_issues_data.keys(),
-            config_data
-        )
-        logger.info(f"Собрано {len(microservices_for_summary_table)} записей для сводной таблицы микросервисов.")
-        logger.debug(f"Данные для сводной таблицы: {microservices_for_summary_table}")
+        ms_summary_data = docx_creator.extract_microservice_info_for_summary_table(grouped_issues_data.keys(), main_cfg)
 
-    logger.info(f"Генерация DOCX документа '{docx_file_path}' для релиза '{final_release_title}'...")
+    logger.info(f"Генерация DOCX: '{docx_fpath}' для релиза '{final_release_title}'...")
     success = docx_creator.create_release_notes_docx(
-        docx_file_path,
-        final_release_title,
-        grouped_issues_data,
-        col_config['use_issue_type_grouping'],
-        microservices_summary_data=microservices_for_summary_table,
-        default_font_name=docx_font_name,
-        config_data=config_data
+        docx_fpath, final_release_title, grouped_issues_data,
+        col_cfg['use_issue_type_grouping'],
+        microservices_summary_data=ms_summary_data,
+        main_config=main_cfg, style_config=styles_cfg
     )
 
     if success:
-        logger.info(f"--- Генерация отчета успешно завершена. Файл: {os.path.abspath(docx_file_path)} ---")
+        logger.info(f"--- Генерация отчета успешно завершена: {os.path.abspath(docx_fpath)} ---")
     else:
-        logger.error("--- Возникли ошибки при создании DOCX. Файл может быть не создан или некорректен. ---")
-        sys.exit(1)
+        logger.error("--- Ошибки при создании DOCX. ---"); sys.exit(1)
 
 
 if __name__ == "__main__":
