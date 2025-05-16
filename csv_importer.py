@@ -15,6 +15,9 @@ def sanitize_text_csv(text):
 
 
 def load_and_process_issues(csv_filepath, col_config):
+    # ... (код этой функции остается таким же, как в предыдущем полном примере)
+    # Важно, чтобы col_config['use_issue_type_grouping'] корректно обновлялся,
+    # если колонка issue_type не найдена, но запрошена группировка.
     all_rows = []
     header = []
     header_map = {}
@@ -27,7 +30,7 @@ def load_and_process_issues(csv_filepath, col_config):
             logger.debug(f"CSV Headers: {header}")
             for i, col_name in enumerate(header):
                 clean_col_name = sanitize_text_csv(col_name)
-                if clean_col_name not in header_map:  # Берем первый индекс, если имена дублируются
+                if clean_col_name not in header_map:
                     header_map[clean_col_name] = i
             logger.debug(f"Header map (name to index): {header_map}")
 
@@ -36,7 +39,6 @@ def load_and_process_issues(csv_filepath, col_config):
                 'key': col_config['key'],
                 'customer_desc': col_config['customer_desc'],
                 'install_instructions': col_config['install_instructions']
-                # fix_versions_name и issue_type проверяются отдельно
             }
 
             for col_key, col_val_name in critical_cols_to_check.items():
@@ -45,7 +47,7 @@ def load_and_process_issues(csv_filepath, col_config):
                         f"Ошибка: Обязательная колонка '{col_val_name}' (для поля '{col_key}') не найдена в CSV файле.")
                     required_cols_present = False
 
-            if col_config['fix_versions_name'] not in header:  # Ищем точное совпадение в исходных заголовках
+            if col_config['fix_versions_name'] not in header:
                 logger.error(
                     f"Ошибка: Колонка '{col_config['fix_versions_name']}' (для версий) не найдена в CSV файле.")
                 required_cols_present = False
@@ -58,7 +60,7 @@ def load_and_process_issues(csv_filepath, col_config):
                 else:
                     logger.warning(
                         f"Колонка для типа задачи '{issue_type_col_name}' не найдена или не указана. Группировка по типу задачи будет отключена.")
-                    col_config['use_issue_type_grouping'] = False
+                    col_config['use_issue_type_grouping'] = False  # Обновляем col_config!
 
             if not required_cols_present:
                 logger.error("Одна или несколько обязательных колонок отсутствуют. Прерывание загрузки.")
@@ -75,20 +77,17 @@ def load_and_process_issues(csv_filepath, col_config):
             for i, row in enumerate(reader):
                 if len(row) == len(header):
                     all_rows.append([sanitize_text_csv(cell) for cell in row])
-                elif any(cell.strip() for cell in row):  # Если строка не пустая, но не соответствует
+                elif any(cell.strip() for cell in row):
                     logger.warning(
                         f"Строка {i + 2}: Пропуск строки с некорректным числом полей (ожидалось {len(header)}, получено {len(row)}): {str(row)[:100]}...")
 
         logger.info(f"load_and_process_issues: Успешно прочитано {len(all_rows)} строк данных.")
-        logger.debug(f"load_and_process_issues: Header map: {header_map}")
-        logger.debug(f"load_and_process_issues: Fix Version/s indices: {fix_versions_col_indices}")
-        logger.debug(f"load_and_process_issues: Issue Type index: {issue_type_col_index}")
         return all_rows, header_map, fix_versions_col_indices, issue_type_col_index
 
     except FileNotFoundError:
         logger.error(f"Ошибка: CSV файл '{csv_filepath}' не найден.")
         return None, None, None, None
-    except StopIteration:  # Файл пустой или содержит только заголовки
+    except StopIteration:
         logger.error(f"Ошибка: CSV файл '{csv_filepath}' пуст или содержит только строку заголовков.")
         return None, None, None, None
     except Exception as e:
@@ -97,6 +96,7 @@ def load_and_process_issues(csv_filepath, col_config):
 
 
 def find_global_version_title(all_tasks_data, fix_versions_col_indices):
+    # ... (код этой функции остается таким же, как в предыдущем полном примере)
     global_versions_found = set()
     for task_data_row in all_tasks_data:
         current_task_versions = []
@@ -107,26 +107,27 @@ def find_global_version_title(all_tasks_data, fix_versions_col_indices):
         for version in current_task_versions:
             if "(global)" in version:
                 title = version.replace("(global)", "").strip()
-                if title:  # Убедимся, что после удаления (global) что-то осталось
+                if title:
                     global_versions_found.add(title)
 
     if not global_versions_found:
-        logger.warning(
-            "Глобальная версия с суффиксом '(global)' не найдена. Используется стандартный заголовок 'Описание Релиза'.")
-        return "Описание Релиза"
+        logger.debug(
+            "Глобальная версия с суффиксом '(global)' не найдена.")  # Изменено на debug, т.к. заголовок может быть из конфига
+        return ""  # Возвращаем пустую строку, если не найдено, main.py решит, что использовать
 
     sorted_global_versions = sorted(list(global_versions_found))
     if len(sorted_global_versions) > 1:
         logger.warning(
             f"Найдено несколько уникальных глобальных версий: {sorted_global_versions}. Используется первая: {sorted_global_versions[0]}")
 
-    final_title = sorted_global_versions[0]
-    logger.info(f"Найдена глобальная версия для заголовка: '{final_title}'")
-    return final_title
+    final_title_part = sorted_global_versions[0]
+    logger.info(f"Найдена часть глобальной версии для заголовка: '{final_title_part}'")
+    return final_title_part
 
 
 def group_issues_by_version_and_type(all_tasks_data, header_map, col_config, fix_versions_col_indices,
-                                     issue_type_col_index):
+                                     issue_type_col_index, config_data):
+    # config_data передается для маппинга имен типов задач
     use_type_grouping = col_config.get('use_issue_type_grouping', False) and issue_type_col_index is not None
 
     if use_type_grouping:
@@ -134,7 +135,8 @@ def group_issues_by_version_and_type(all_tasks_data, header_map, col_config, fix
     else:
         grouped_issues = defaultdict(list)
 
-    microservice_version_pattern = re.compile(r"^([A-Z]{2}\d+(\.\d+){1,2})$")
+    # Паттерн для извлечения префикса и номера версии. Префикс - 2 большие буквы.
+    microservice_version_pattern = re.compile(r"^([A-Z]{2})(\d+(\.\d+){1,2})$")
 
     key_col_idx = header_map.get(col_config['key'])
     cust_desc_col_idx = header_map.get(col_config['customer_desc'])
@@ -158,15 +160,20 @@ def group_issues_by_version_and_type(all_tasks_data, header_map, col_config, fix
 
         task_versions_unique = list(set(task_versions_from_row))
 
-        current_microservice_versions = [ver for ver in task_versions_unique if microservice_version_pattern.match(ver)]
+        # Собираем ОРИГИНАЛЬНЫЕ версии микросервисов, подходящие под паттерн
+        current_microservice_versions_original = []
+        for ver in task_versions_unique:
+            if microservice_version_pattern.match(ver):
+                current_microservice_versions_original.append(ver)
 
-        if not current_microservice_versions:
+        if not current_microservice_versions_original:
             logger.debug(
                 f"Задача {task_key_value}: не найдено подходящих версий микросервисов из {task_versions_unique}. Пропуск.")
             continue
 
         tasks_matched_microservice_version += 1
-        logger.debug(f"Задача {task_key_value}: найдены версии микросервисов: {current_microservice_versions}")
+        logger.debug(
+            f"Задача {task_key_value}: найдены ОРИГИНАЛЬНЫЕ версии микросервисов: {current_microservice_versions_original}")
 
         task_details = {
             'key': task_key_value,
@@ -177,30 +184,33 @@ def group_issues_by_version_and_type(all_tasks_data, header_map, col_config, fix
                 raw_row_data) and raw_row_data[install_instr_col_idx] else ""
         }
 
-        current_issue_type = "Задачи"  # Тип по умолчанию
+        # Определяем ОТОБРАЖАЕМОЕ имя типа задачи
+        current_issue_type_display = "Задачи"  # Тип по умолчанию
         if use_type_grouping:
-            issue_type_val = raw_row_data[issue_type_col_index] if issue_type_col_index < len(raw_row_data) else None
-            if issue_type_val:
-                current_issue_type = issue_type_val.strip()
-            else:
-                current_issue_type = "Не указан тип"
+            system_issue_type = raw_row_data[issue_type_col_index] if issue_type_col_index < len(
+                raw_row_data) else "Не указан тип"
+            system_issue_type = system_issue_type.strip() if system_issue_type else "Не указан тип"
 
-        for ms_ver in current_microservice_versions:
+            # Получаем отображаемое имя из конфига, передаем system_issue_type как ключ
+            current_issue_type_display = config_data.get('IssueTypeNames', {}).get(system_issue_type, system_issue_type)
+            logger.debug(
+                f"Задача {task_key_value}: системный тип '{system_issue_type}', отображаемый тип '{current_issue_type_display}'")
+
+        for ms_ver_original_key in current_microservice_versions_original:
             if use_type_grouping:
-                grouped_issues[ms_ver][current_issue_type].append(task_details)
+                grouped_issues[ms_ver_original_key][current_issue_type_display].append(task_details)
             else:
-                grouped_issues[ms_ver].append(task_details)
+                grouped_issues[ms_ver_original_key].append(task_details)
             tasks_processed_for_grouping += 1
 
     logger.info(f"Группировка: обработано {tasks_matched_microservice_version} задач с версиями микросервисов.")
     logger.info(f"Группировка: всего записей о задачах добавлено в группы: {tasks_processed_for_grouping}.")
 
-    # Сортировка
-    for ms_ver in grouped_issues:
-        if use_type_grouping:
-            for i_type in grouped_issues[ms_ver]:
-                grouped_issues[ms_ver][i_type].sort(key=lambda x: x['key'])
-        else:
-            grouped_issues[ms_ver].sort(key=lambda x: x['key'])
+    for ms_ver_original_key in grouped_issues:
+        if use_type_grouping and isinstance(grouped_issues[ms_ver_original_key], dict):
+            for issue_type_key in grouped_issues[ms_ver_original_key]:
+                grouped_issues[ms_ver_original_key][issue_type_key].sort(key=lambda x: x['key'])
+        elif isinstance(grouped_issues[ms_ver_original_key], list):
+            grouped_issues[ms_ver_original_key].sort(key=lambda x: x['key'])
 
     return grouped_issues
