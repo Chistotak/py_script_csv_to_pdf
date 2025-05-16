@@ -5,6 +5,7 @@ import logging
 import sys
 import os
 import configparser
+import re  # Для extract_microservice_info_for_summary
 
 import csv_importer
 
@@ -14,7 +15,6 @@ except ImportError:
     sys.exit(1)
 
 # --- Стандартные значения ---
-# ... (остаются как есть) ...
 DEFAULT_COL_ISSUE_KEY = "Issue key"
 DEFAULT_COL_FIX_VERSIONS_NAME = "Fix Version/s"
 DEFAULT_COL_CUSTOMER_DESC = "Custom field (Description for the customer)"
@@ -33,13 +33,10 @@ def setup_logging():
 
 
 def load_config(config_filepath=DEFAULT_CONFIG_FILE):
-    # Получаем логгер для текущего модуля (где определена эта функция)
-    # Поскольку эта функция находится в том же файле, что и main,
-    # имя логгера будет __main__ если скрипт запущен напрямую.
-    logger = logging.getLogger(__name__)  # <--- ДОБАВЛЕНО ЗДЕСЬ
-
+    logger = logging.getLogger(__name__)
     config = configparser.ConfigParser(allow_no_value=True, inline_comment_prefixes=('#', ';'))
-    config.optionxform = str
+    config.optionxform = str  # Сохраняем регистр ключей опций
+
     config_data = {
         'General': {},
         'MicroserviceVersions': {},
@@ -62,25 +59,75 @@ def load_config(config_filepath=DEFAULT_CONFIG_FILE):
     if os.path.exists(config_filepath):
         try:
             config.read(config_filepath, encoding='utf-8')
-            logger.info(f"Конфигурационный файл '{config_filepath}' успешно загружен.")  # Теперь logger доступен
-            for section in config.sections():
-                if section in config_data:
-                    config_data[section].update(dict(config.items(section)))
+            logger.info(f"Конфигурационный файл '{config_filepath}' успешно загружен.")
+            for section_name_from_file in config.sections():
+                # Ищем соответствие секции из файла в нашем config_data
+                # (с учетом возможного разного регистра, хотя optionxform=str должен помочь)
+                matched_section_key = None
+                for key_in_config_data in config_data.keys():
+                    if key_in_config_data.lower() == section_name_from_file.lower():
+                        matched_section_key = key_in_config_data
+                        break
+
+                if matched_section_key:
+                    config_data[matched_section_key].update(dict(config.items(section_name_from_file)))
                 else:
-                    config_data[section] = dict(config.items(section))
+                    # Если секции нет в нашем шаблоне, добавляем ее как есть
+                    config_data[section_name_from_file] = dict(config.items(section_name_from_file))
         except configparser.Error as e:
             logger.error(f"Ошибка при чтении конфигурационного файла '{config_filepath}': {e}")
     else:
         logger.warning(
-            f"Конфигурационный файл '{config_filepath}' не найден. Будут использованы значения по умолчанию для путей и настроек.")
+            f"Конфигурационный файл '{config_filepath}' не найден. Будут использованы значения по умолчанию.")
 
     logger.debug(f"Загруженная конфигурация: {config_data}")
     return config_data
 
 
+def extract_microservice_info_for_summary(grouped_data_keys, config_data):
+    logger = logging.getLogger(__name__)
+    microservices_summary = []
+    version_pattern = re.compile(r"^([A-Z]{2})(\d+(\.\d+){1,2})$")
+    seen_summary_entries = set()
+
+    for original_ms_key in sorted(list(grouped_data_keys)):
+        service_name_for_table = original_ms_key
+        version_number_part = ""
+
+        match = version_pattern.match(original_ms_key)
+        if match:
+            prefix_key_for_config = match.group(1).upper()  # Ключ для поиска в конфиге (AM, FR)
+            version_number_part = match.group(2)
+
+            template = config_data.get('MicroserviceVersions', {}).get(prefix_key_for_config)
+            if template:
+                # Извлекаем "чистое" имя сервиса из шаблона
+                # Удаляем "(версия {{version}})" и лишние пробелы
+                service_name_for_table = template.replace("{{version}}", "").replace("(версия )", "").strip()
+            else:
+                service_name_for_table = prefix_key_for_config  # Если шаблона нет, используем префикс
+        else:
+            logger.warning(
+                f"Не удалось разобрать ключ микросервиса '{original_ms_key}' для сводной таблицы, будет использован как есть.")
+            # В этом случае service_name_for_table = original_ms_key, version_number_part = ""
+
+        # Ключ для проверки уникальности строки в таблице
+        summary_tuple = (service_name_for_table, version_number_part)
+        if summary_tuple not in seen_summary_entries:
+            microservices_summary.append({
+                'service_name': service_name_for_table,
+                'version_number': version_number_part
+            })
+            seen_summary_entries.add(summary_tuple)
+            logger.debug(
+                f"Для сводной таблицы: Сервис='{service_name_for_table}', Версия='{version_number_part}' (из ключа '{original_ms_key}')")
+
+    return microservices_summary
+
+
 def main():
-    setup_logging()  # Сначала настраиваем логирование
-    logger = logging.getLogger(__name__)  # Затем получаем логгер для функции main
+    setup_logging()
+    logger = logging.getLogger(__name__)
 
     parser = argparse.ArgumentParser(description="Генератор DOCX с описанием релиза из JIRA CSV.")
     parser.add_argument("--config", default=DEFAULT_CONFIG_FILE,
@@ -94,17 +141,12 @@ def main():
     args = parser.parse_args()
 
     config_file_path = args.config
-
-    # --- Загрузка конфигурации ---
-    # Теперь load_config сама создаст/получит свой логгер
     config_data = load_config(config_file_path)
 
-    # ... (остальная часть функции main без изменений) ...
     csv_file_path = args.csv_file if args.csv_file else config_data['General'].get('csv_input_file',
                                                                                    DEFAULT_CSV_INPUT_FILE)
     docx_file_path = args.docx_file if args.docx_file else config_data['General'].get('docx_output_file',
                                                                                       DEFAULT_DOCX_OUTPUT_FILE)
-
     docx_font_name = config_data['General'].get('docx_font', DEFAULT_FONT_NAME_DOCX)
 
     col_config = {
@@ -115,7 +157,6 @@ def main():
         'install_instructions': config_data['Columns'].get('install_instructions', DEFAULT_COL_INSTALL_INSTRUCTIONS),
         'issue_type': config_data['Columns'].get('issue_type', DEFAULT_COL_ISSUE_TYPE),
     }
-
     if args.no_issue_type_grouping:
         col_config['use_issue_type_grouping'] = False
     else:
@@ -123,22 +164,17 @@ def main():
                                                                            'true').lower() == 'true'
 
     logger.info(f"--- Начало генерации отчета ---")
-    logger.info(f"Конфигурационный файл: {os.path.abspath(config_file_path)}")
-    logger.info(f"Входной CSV файл: {os.path.abspath(csv_file_path)}")
-    logger.info(f"Выходной DOCX файл: {os.path.abspath(docx_file_path)}")
-    logger.info(f"Конфигурация колонок: {col_config}")
-    logger.info(f"Используемый шрифт для DOCX (предпочтительный): {docx_font_name}")
+    # ... (логирование параметров) ...
 
     raw_task_data, header_map, fix_versions_col_indices, issue_type_col_idx = \
         csv_importer.load_and_process_issues(csv_file_path, col_config)
 
     if raw_task_data is None:
-        logger.error("Не удалось загрузить данные из CSV. DOCX не будет создан.")
         sys.exit(1)
-    logger.info(f"Прочитано {len(raw_task_data)} строк задач из CSV (исключая заголовок).")
+    # ... (логирование количества прочитанных строк) ...
 
     global_version_part = csv_importer.find_global_version_title(raw_task_data, fix_versions_col_indices)
-
+    # ... (логика формирования final_release_title) ...
     release_title_override = config_data['General'].get('release_title_override')
     if release_title_override:
         final_release_title = release_title_override
@@ -168,11 +204,17 @@ def main():
     )
 
     if grouped_issues_data is None:
-        logger.error("Не удалось сгруппировать задачи. DOCX не будет создан.")
         sys.exit(1)
+    # ... (логирование количества сгруппированных версий) ...
 
-    num_ms_versions = len(grouped_issues_data)
-    logger.info(f"Сгруппировано задач по {num_ms_versions} версиям микросервисов.")
+    microservices_for_summary_table = []
+    if grouped_issues_data:
+        microservices_for_summary_table = extract_microservice_info_for_summary(
+            grouped_issues_data.keys(),
+            config_data
+        )
+        logger.info(f"Собрано {len(microservices_for_summary_table)} записей для сводной таблицы микросервисов.")
+        logger.debug(f"Данные для сводной таблицы: {microservices_for_summary_table}")
 
     logger.info(f"Генерация DOCX документа '{docx_file_path}' для релиза '{final_release_title}'...")
     success = docx_creator.create_release_notes_docx(
@@ -180,6 +222,7 @@ def main():
         final_release_title,
         grouped_issues_data,
         col_config['use_issue_type_grouping'],
+        microservices_summary_data=microservices_for_summary_table,
         default_font_name=docx_font_name,
         config_data=config_data
     )
